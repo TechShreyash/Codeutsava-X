@@ -13,10 +13,13 @@ const read = async () => {
   return response.json();
 };
 
-test('standalone release serves assets, disables demo, starts, handles a backend flag-only reset and restarts', async () => {
+test('release serves assets and matches legacy row creation, duplicate detection and deletion reset', async (t) => {
   const marker = await fetch(new URL('/_preview/status', base));
   assert.equal(marker.status, 200);
   assert.equal((await marker.json()).mode, 'isolated-production-preview', 'Never write unless the isolated preview identifies itself.');
+  const deleteCounters = () => fetch(new URL('/_preview/delete-counters', base), { method: 'POST' });
+  assert.equal((await deleteCounters()).status, 200);
+  t.after(async () => { assert.equal((await deleteCounters()).status, 200); });
   const page = await fetch(new URL('/timer?demo=1', base));
   assert.equal(page.status, 200);
   const html = await page.text();
@@ -46,27 +49,37 @@ test('standalone release serves assets, disables demo, starts, handles a backend
     assert.equal((await fetch(new URL('/api/countdown/demo', base), { method })).status, 404);
   }
   const ready = await read();
-  assert.equal(ready.counter.flag, false, 'Reset the local preview before running this test.');
+  assert.equal(ready.counter.flag, false);
   const startTime = ready.serverTime;
   const payload = { flag: true, startTime, endTime: startTime + 28 * 3600000 };
-  const start = () => fetch(new URL('/server/setcounter/', base), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  const start = (counter) => fetch(new URL('/server/setcounter/', base), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(counter),
   });
-  const starts = await Promise.all([start(), start()]);
-  assert.deepEqual(starts.map((response) => response.status).sort(), [200, 409]);
+  const firstStart = await start(payload);
+  assert.equal(firstStart.status, 200);
+  assert.deepEqual(await firstStart.json(), {}, 'Legacy POST returns an empty object after inserting.');
+  const rawRead = async () => (await (await fetch(new URL('/server/getcounter/', base))).json()).data;
+  assert.deepEqual(await rawRead(), [payload]);
   assert.deepEqual((await read()).counter, payload);
   assert.deepEqual((await read()).counter, payload);
   const reset = await fetch(new URL('/_preview/reset-flag', base), { method: 'POST' });
   assert.equal(reset.status, 200);
-  assert.deepEqual((await reset.json()).data[0], { ...payload, flag: false }, 'Admin reset leaves the old timestamps intact.');
+  assert.deepEqual((await reset.json()).data[0], { ...payload, flag: false }, 'Unchecking Flag retains the row and timestamps.');
   const initial = await read();
   assert.deepEqual(initial.counter, { flag: false, startTime: 0, endTime: 0 });
   const restartedAt = Math.max(Date.now(), payload.startTime + 1);
   const restarted = { flag: true, startTime: restartedAt, endTime: restartedAt + 28 * 3600000 };
-  const restart = await fetch(new URL('/server/setcounter/', base), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(restarted),
-  });
-  assert.equal(restart.status, 200);
+  assert.equal((await start(restarted)).status, 200);
+  assert.deepEqual(await rawRead(), [{ ...payload, flag: false }, restarted], 'Flag-only reset followed by Start appends a second row.');
+  const duplicates = await fetch(new URL('/api/countdown', base));
+  assert.equal(duplicates.status, 409);
+  assert.equal(duplicates.headers.get('cache-control'), 'no-store');
+  assert.match((await duplicates.json()).error, /Multiple counter records/);
+  assert.equal((await deleteCounters()).status, 200);
+  assert.deepEqual(await rawRead(), { flag: false, startTime: 0, endTime: 0 });
+  assert.deepEqual((await read()).counter, { flag: false, startTime: 0, endTime: 0 });
+  assert.equal((await start(restarted)).status, 200);
+  assert.deepEqual(await rawRead(), [restarted], 'Deletion reset followed by Start leaves exactly one fresh row.');
   assert.deepEqual((await read()).counter, restarted);
   assert.equal((await fetch(new URL('/', base))).status, 200);
 });

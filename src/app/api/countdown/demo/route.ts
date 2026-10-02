@@ -1,16 +1,20 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { COUNTDOWN_DURATION, createStartPayload, type Counter } from "@/lib/countdown";
+import { COUNTDOWN_DURATION, createStartPayload, MultipleCountersError, parseCounter, type Counter } from "@/lib/countdown";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const file = path.join(process.cwd(), ".next", "countdown-demo.json");
-type DemoState = { counter: Counter; outage: boolean };
+type DemoState = { counters: Counter[]; outage: boolean };
 let queue: Promise<unknown> = Promise.resolve();
-const initial = (): DemoState => ({ counter: { flag: false, startTime: 0, endTime: 0 }, outage: false });
+const initial = (): DemoState => ({ counters: [], outage: false });
 
 async function readState(): Promise<DemoState> {
-  try { return JSON.parse(await readFile(file, "utf8")) as DemoState; }
+  try {
+    const state = JSON.parse(await readFile(file, "utf8")) as DemoState & { counter?: Counter };
+    // Preserve an active rehearsal saved by the earlier singleton mock.
+    return { counters: state.counters ?? (state.counter?.flag ? [state.counter] : []), outage: state.outage };
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return initial();
     throw error;
@@ -26,7 +30,13 @@ export async function GET() {
   await queue;
   const state = await readState();
   if (state.outage) return json({ error: "Demo connection lost. Restore connection to resume syncing." }, 503);
-  return json({ counter: state.counter, serverTime: Date.now() });
+  try {
+    const counter = parseCounter({ data: state.counters.length ? state.counters : { flag: false, startTime: 0, endTime: 0 } });
+    return json({ counter, serverTime: Date.now() });
+  } catch (error) {
+    if (error instanceof MultipleCountersError) return json({ error: error.message }, 409);
+    throw error;
+  }
 }
 
 export async function POST(request: Request) {
@@ -40,15 +50,15 @@ export async function POST(request: Request) {
     const state = await readState();
     if (action === "start") {
       if (state.outage) return json({ error: "Restore connection before starting." }, 503);
-      if (state.counter.flag) return json({ error: "The countdown has already started." }, 409);
-      state.counter = createStartPayload(Date.now());
+      // Match Django's legacy POST: every call inserts another record.
+      state.counters.push(createStartPayload(Date.now()));
     } else if (action === "reset") Object.assign(state, initial());
-    else if (action === "finish") { const now = Date.now(); state.counter = { flag: true, startTime: now - COUNTDOWN_DURATION, endTime: now }; }
+    else if (action === "finish") { const now = Date.now(); state.counters = [{ flag: true, startTime: now - COUNTDOWN_DURATION, endTime: now }]; }
     else state.outage = action === "disconnect";
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(`${file}.tmp`, JSON.stringify(state));
     await rename(`${file}.tmp`, file);
-    return json({ counter: state.counter, serverTime: Date.now() });
+    return json({});
   });
   queue = operation.catch(() => undefined);
   return operation;

@@ -1,4 +1,4 @@
-import { parseCounter } from "@/lib/countdown";
+import { MultipleCountersError, parseCounter } from "@/lib/countdown";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +17,11 @@ export async function GET() {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {
+    if (error instanceof MultipleCountersError) {
+      return Response.json({ error: error.message }, {
+        status: 409, headers: { "Cache-Control": "no-store" },
+      });
+    }
     console.error("[countdown]", error);
     return Response.json({ error: "The countdown service is unavailable. Please retry." }, {
       status: 502, headers: { "Cache-Control": "no-store" },

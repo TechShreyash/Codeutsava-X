@@ -11,9 +11,17 @@ export interface CounterSnapshot {
   serverTime: number;
 }
 
+export class MultipleCountersError extends Error {
+  constructor() {
+    super("Multiple counter records exist. Ask the organizer to keep only the intended counter in Django admin, or delete all counter records before restarting.");
+    this.name = "MultipleCountersError";
+  }
+}
+
 export function parseCounter(payload: unknown): Counter {
   const envelope = payload as { data?: unknown } | null;
   const data = envelope?.data ?? payload;
+  if (Array.isArray(data) && data.length > 1) throw new MultipleCountersError();
   const candidate = (Array.isArray(data) ? data[0] : data) as Partial<Counter> | null;
   if (!candidate || typeof candidate.flag !== "boolean") {
     throw new Error("The countdown service returned an invalid counter.");

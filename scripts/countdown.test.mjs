@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { COUNTDOWN_DURATION, parseCounter, createStartPayload, remainingSeconds, counterPhase, csrfTokenFromCookie } from '../src/lib/countdown.ts';
+import { COUNTDOWN_DURATION, MultipleCountersError, parseCounter, createStartPayload, remainingSeconds, counterPhase, csrfTokenFromCookie } from '../src/lib/countdown.ts';
 
 const start = Date.parse('2026-10-03T09:00:00+05:30');
 test('accepts both backend response shapes and numeric-string timestamps', () => {
@@ -33,10 +33,10 @@ test('reload joins remaining time, rounds partial seconds up and clamps expiry',
   assert.equal(counterPhase(counter, counter.endTime), 'complete');
   assert.equal(counter.flag, true);
 });
-test('backend flag-only reset restores ready state after a running or completed timer and permits a fresh 28-hour start', () => {
+test('deleting backend records restores ready state and allows a fresh single-row 28-hour start', () => {
   const original = createStartPayload(start);
   for (const now of [start + 3600000, original.endTime + 3600000]) {
-    const reset = parseCounter({ data: [{ ...original, flag: false }] });
+    const reset = parseCounter({ data: { flag: false, startTime: 0, endTime: 0 } });
     assert.equal(counterPhase(reset, now), 'ready');
     assert.equal(remainingSeconds(reset, now), 28 * 3600);
     assert.deepEqual(reset, { flag: false, startTime: 0, endTime: 0 });
@@ -46,6 +46,13 @@ test('backend flag-only reset restores ready state after a running or completed 
     assert.equal(restarted.endTime - restarted.startTime, COUNTDOWN_DURATION);
     assert.equal(counterPhase(restarted, now), 'running');
     assert.equal(remainingSeconds(restarted, now), 28 * 3600);
+  }
+});
+test('rejects duplicate backend rows instead of hiding a new start behind an old false flag', () => {
+  const original = createStartPayload(start);
+  const restarted = createStartPayload(start + 3600000);
+  for (const rows of [[original, restarted], [{ ...original, flag: false }, restarted], [{ ...original, flag: false }, { ...restarted, flag: false }]]) {
+    assert.throws(() => parseCounter({ data: rows }), MultipleCountersError);
   }
 });
 test('extracts a real Django CSRF cookie without using template placeholders', () => {

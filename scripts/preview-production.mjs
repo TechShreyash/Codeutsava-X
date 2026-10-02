@@ -19,7 +19,11 @@ const port = Number(process.env.PREVIEW_PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1024 || port > 65534) throw new Error('Invalid PREVIEW_PORT.');
 const appPort = port + 1;
 const duration = 28 * 3600000;
-let counter = { flag: false, startTime: 0, endTime: 0 };
+let counters = [];
+const counterResponse = () => ({
+  message: counters.length ? 'Counter Already Started.' : 'Counter Not Started.',
+  data: counters.length ? counters : { flag: false, startTime: 0, endTime: 0 },
+});
 let offline = false;
 const json = (response, status, body) => {
   response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -32,16 +36,22 @@ const proxy = http.createServer(async (request, response) => {
     json(response, 200, { mode: 'isolated-production-preview' });
     return;
   }
-  // Local fixture only: mirrors unchecking Flag in Django without touching timestamps.
+  // Local fixtures only: admin deletion and flag edits are distinct operations.
+  if (pathname === '/_preview/delete-counters' && request.method === 'POST') {
+    counters = [];
+    offline = false;
+    json(response, 200, counterResponse());
+    return;
+  }
   if (pathname === '/_preview/reset-flag' && request.method === 'POST') {
-    counter = { ...counter, flag: false };
-    json(response, 200, { data: [counter] });
+    if (counters.length) counters[0] = { ...counters[0], flag: false };
+    json(response, 200, counterResponse());
     return;
   }
   if (pathname.startsWith('/server/')) {
     if (offline) { json(response, 503, { error: 'Local preview counter is offline.' }); return; }
     if (pathname === '/server/getcounter/' && request.method === 'GET') {
-      json(response, 200, { data: [counter] });
+      json(response, 200, counterResponse());
       return;
     }
     if (pathname === '/server/setcounter/' && request.method === 'POST') {
@@ -55,12 +65,12 @@ const proxy = http.createServer(async (request, response) => {
           if (body.length > 4096) { json(response, 413, { error: 'Request too large.' }); return; }
         }
         const next = JSON.parse(body);
-        if (counter.flag) { json(response, 409, { error: 'Counter already started.' }); return; }
         if (next.flag !== true || !Number.isSafeInteger(next.startTime) || next.startTime <= 0 || next.endTime - next.startTime !== duration) {
           json(response, 400, { error: 'Expected a 28-hour counter in epoch milliseconds.' }); return;
         }
-        counter = { flag: true, startTime: next.startTime, endTime: next.endTime };
-        json(response, 200, { data: counter });
+        // Django's legacy serializer.save() inserts a new row on every POST.
+        counters.push({ flag: true, startTime: next.startTime, endTime: next.endTime });
+        json(response, 200, {});
       } catch { json(response, 400, { error: 'Invalid JSON.' }); }
       return;
     }
@@ -96,18 +106,18 @@ const app = spawn(process.execPath, [path.join(standalone, 'server.js')], {
 const consoleInput = createInterface({ input: process.stdin, output: process.stdout });
 consoleInput.on('line', (line) => {
   switch (line.trim()) {
-    case 'reset': counter = { flag: false, startTime: 0, endTime: 0 }; offline = false; break;
-    case 'flag-off': counter = { ...counter, flag: false }; break;
+    case 'reset': counters = []; offline = false; break;
+    case 'flag-off': if (counters.length) counters[0] = { ...counters[0], flag: false }; break;
     case 'finish': {
       const endTime = Date.now();
-      counter = { flag: true, startTime: endTime - duration, endTime };
+      counters = [{ flag: true, startTime: endTime - duration, endTime }];
       break;
     }
     case 'offline': offline = true; break;
     case 'online': offline = false; break;
     default: console.log('Commands: reset, flag-off, finish, offline, online'); return;
   }
-  console.log(`Local counter: ${offline ? 'offline' : JSON.stringify(counter)}. Pages sync within five seconds.`);
+  console.log(`Local counters: ${offline ? 'offline' : JSON.stringify(counters)}. Pages sync within five seconds.`);
 });
 let closing = false;
 const close = () => {

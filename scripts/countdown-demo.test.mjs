@@ -8,12 +8,11 @@ const endpoint = `${url.origin}/api/countdown/demo`;
 const read = () => fetch(endpoint, { cache: 'no-store' });
 const action = (name) => fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: name }) });
 
-test('local shared timer: start, competing click, reload, outage, recovery, finish and reset', async () => {
+test('legacy local timer: start, reload, outage, recovery, finish, duplicate detection and deletion reset', async () => {
   try {
     assert.equal((await action('reset')).status, 200);
     assert.equal((await (await read()).json()).counter.flag, false);
-    const starts = await Promise.all([action('start'), action('start')]);
-    assert.deepEqual(starts.map((response) => response.status).sort(), [200, 409]);
+    assert.equal((await action('start')).status, 200);
     const first = await (await read()).json();
     assert.equal(first.counter.endTime - first.counter.startTime, 28 * 3600000);
     const second = await (await read()).json();
@@ -27,7 +26,16 @@ test('local shared timer: start, competing click, reload, outage, recovery, fini
     const finished = await (await read()).json();
     assert.equal(finished.counter.flag, true);
     assert.ok(finished.counter.endTime <= finished.serverTime);
-    assert.equal((await action('start')).status, 409);
+    assert.equal((await action('reset')).status, 200);
+    const starts = await Promise.all([action('start'), action('start')]);
+    assert.deepEqual(starts.map((response) => response.status), [200, 200], 'Legacy Django inserts both competing calls.');
+    const duplicates = await read();
+    assert.equal(duplicates.status, 409);
+    assert.match((await duplicates.json()).error, /Multiple counter records/);
+    assert.equal((await action('reset')).status, 200);
+    assert.equal((await (await read()).json()).counter.flag, false);
+    assert.equal((await action('start')).status, 200);
+    assert.equal((await (await read()).json()).counter.endTime - (await (await read()).json()).counter.startTime, 28 * 3600000);
     assert.equal((await action('unknown')).status, 400);
     const crossOrigin = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' }, body: JSON.stringify({ action: 'reset' }) });
     assert.equal(crossOrigin.status, 403);
